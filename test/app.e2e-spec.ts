@@ -16,10 +16,12 @@ describe('AppController (e2e)', () => {
     await app.init();
   });
 
-  it('/ (GET)', () => {
-    return request(app.getHttpServer())
-      .get('/')
+  it('Health check da aplicação', async () => {
+    const response = await request(app.getHttpServer())
+      .get('/health/live')
       .expect(200)
-      .expect('Hello World!');
+
+    const data = response.body;
+    expect(data.status).toBe('ok');
   });
 });
