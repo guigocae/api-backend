@@ -1,0 +1,663 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/* =========================
+   ENUMS
+========================= */
+
+enum ClientType {
+  PERSON
+  COMPANY
+}
+
+enum RentalStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  FINISHED
+  CANCELED
+}
+
+enum RentalChannel {
+  WEB
+  MOBILE
+  ADMIN
+  API
+}
+
+enum EquipmentStatus {
+  AVAILABLE
+  RENTED
+  MAINTENANCE
+  SOLD
+  DISABLED
+}
+
+enum PartStatus {
+  AVAILABLE
+  MAINTENANCE
+  DISABLED
+}
+
+enum FiscalDocType {
+  IN   // entrada (compra de peças, etc.)
+  OUT  // saída (venda de equipamento, etc.)
+}
+
+enum WorkOrderType {
+  MAINTENANCE
+  INSTALLATION
+  DISMANTLING
+  RECEIVING
+  PREVENTIVE
+}
+
+enum WorkOrderStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CANCELED
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  FINISHED
+  CANCELED
+}
+
+enum AgendaItemKind {
+  RENTAL_SETUP      // montagem
+  RENTAL_TEARDOWN   // desmontagem
+  SUPPORT_VISIT
+  MAINTENANCE_VISIT
+  NOTICE            // aviso manual (depois)
+  PENDENCY          // pendência (depois)
+}
+
+enum AgendaItemStatus {
+  PLANNED
+  DONE
+  CANCELED
+}
+
+/* =========================
+   IAM / USERS (mínimo)
+   (id pode ser Clerk ID)
+========================= */
+
+enum UserRole {
+  MASTER
+  ADMIN
+  TECHNICIAN
+  LOGISTICS
+}
+
+model User {
+  id        String   @id
+  role      UserRole @default(TECHNICIAN)
+  isActive  Boolean  @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  // relações úteis
+  createdRentals           Rental[]          @relation("RentalCreatedBy")
+  createdEquipments        Equipment[]       @relation("EquipmentCreatedBy")
+  createdFiscalDocs        FiscalDoc[]       @relation("FiscalDocCreatedBy")
+  createdWorkOrders        WorkOrder[]       @relation("WorkOrderCreatedBy")
+  createdTickets           SupportTicket[]   @relation("SupportTicketCreatedBy")
+  createdMaintenances      Maintenance[]     @relation("MaintenanceCreatedBy")
+  assignedRentalEquipments RentalEquipment[] @relation("RentalEquipmentAssignedBy")
+  installedEquipmentParts  EquipmentPart[]
+
+  auditLogs          AuditLog[]
+}
+
+/* =========================
+   CLIENTS
+========================= */
+
+model Client {
+  id          String     @id @default(uuid()) @db.Uuid
+  type        ClientType @default(COMPANY)
+
+  companyName String?
+  name        String
+  document    String?    @unique
+
+  email       String?
+  phone       String?
+
+  rentals     Rental[]
+  equipmentSales EquipmentSale[]
+  supportTickets SupportTicket[]
+
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([name])
+  @@index([companyName])
+}
+
+/* =========================
+   FISCAL DOCS (NF / DOCUMENTOS)
+========================= */
+
+model FiscalDoc {
+  id            String       @id @default(uuid()) @db.Uuid
+  type          FiscalDocType
+
+  number        String
+  issuerName    String?
+  issueDate     DateTime?    @db.Timestamptz(3)
+
+  // arquivo (PDF/imagem) armazenado em S3/R2/etc.
+  fileUrl       String?
+  fileKey       String?
+
+  notes         String?
+
+  createdByUserId String?
+  createdByUser   User? @relation("FiscalDocCreatedBy", fields: [createdByUserId], references: [id])
+
+  parts          Part[]          @relation("PartsFromFiscalDocIn")
+  equipmentSales EquipmentSale[] @relation("SalesFromFiscalDocOut")
+
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([type, number])
+  @@index([type])
+  @@index([number])
+}
+
+/* =========================
+   EQUIPMENT MODELS + EQUIPMENT (instância)
+========================= */
+
+model EquipmentModel {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  category  String?
+  isActive  Boolean  @default(true)
+
+  equipments  Equipment[]
+  rentalItems RentalItem[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([isActive])
+  @@index([name])
+}
+
+model Equipment {
+  id          String   @id @default(uuid()) @db.Uuid
+  modelId     String   @db.Uuid
+  model       EquipmentModel @relation(fields: [modelId], references: [id])
+
+  serial      String   @unique // único independente do modelo
+
+  description String?
+  status      EquipmentStatus @default(AVAILABLE)
+
+  warrantyUntil DateTime? @db.Timestamptz(3) // garantia
+
+  // quem cadastrou
+  createdByUserId String?
+  createdByUser   User? @relation("EquipmentCreatedBy", fields: [createdByUserId], references: [id])
+
+  // venda (se status SOLD, normalmente vai ter sale)
+  sale         EquipmentSale?
+
+  // vínculo com locações
+  rentalLinks  RentalEquipment[]
+
+  // peças instaladas
+  parts        EquipmentPart[]
+
+  // suporte / manutenção
+  supportTickets SupportTicket[]
+  maintenances   Maintenance[]
+  workOrders WorkOrder[]
+
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([modelId])
+  @@index([status])
+}
+
+model EquipmentSale {
+  equipmentId String @id @db.Uuid
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+
+  // NF de venda (documento OUT)
+  fiscalDocOutId String @db.Uuid
+  fiscalDocOut   FiscalDoc @relation("SalesFromFiscalDocOut", fields: [fiscalDocOutId], references: [id])
+
+  // cliente que comprou
+  clientId   String @db.Uuid
+  client     Client @relation(fields: [clientId], references: [id])
+
+  soldAt     DateTime @default(now()) @db.Timestamptz(3)
+  notes      String?
+
+  @@index([clientId])
+  @@index([fiscalDocOutId])
+}
+
+/* =========================
+   RENTALS (Locações)
+========================= */
+
+model Rental {
+  id        String   @id @default(uuid()) @db.Uuid
+
+  clientId  String   @db.Uuid
+  client    Client   @relation(fields: [clientId], references: [id])
+
+  // snapshots (congela o que estava no dia)
+  clientNameSnapshot       String
+  clientCompanySnapshot    String?
+
+  eventName     String
+  venueName     String
+  eventCompany  String? // se "Empresa" do evento for diferente do cliente
+
+  addressLine1  String
+  addressLine2  String?
+  city          String
+  state         String
+
+  contactName   String
+  contactEmail  String?
+  contactPhone  String?
+
+  notes         String?
+
+  startAt       DateTime @db.Timestamptz(3)
+  endAt         DateTime @db.Timestamptz(3)
+
+  channel       RentalChannel @default(WEB)
+  status        RentalStatus  @default(PENDING)
+
+  canceledAt    DateTime? @db.Timestamptz(3)
+  finishedAt    DateTime? @db.Timestamptz(3)
+
+  createdByUserId String?
+  createdByUser   User? @relation("RentalCreatedBy", fields: [createdByUserId], references: [id])
+
+  items        RentalItem[]
+  equipments   RentalEquipment[]
+  financial    RentalFinancial?
+
+  // agenda items derivados (montagem/desmontagem)
+  agendaItems  AgendaItem[]
+
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([clientId, startAt])
+  @@index([startAt])
+  @@index([endAt])
+  @@index([status])
+}
+
+model RentalItem {
+  id               String   @id @default(uuid()) @db.Uuid
+  rentalId         String   @db.Uuid
+  equipmentModelId String   @db.Uuid
+
+  rental          Rental         @relation(fields: [rentalId], references: [id])
+  equipmentModel  EquipmentModel @relation(fields: [equipmentModelId], references: [id])
+
+  quantity        Int
+  notes           String?
+
+  rentalEquipments RentalEquipment[]
+
+  @@unique([rentalId, equipmentModelId])
+  @@index([equipmentModelId])
+}
+
+model RentalEquipment {
+  id           String   @id @default(uuid()) @db.Uuid
+
+  rentalId     String   @db.Uuid
+  equipmentId  String   @db.Uuid
+
+  // amarra em qual item (modelo) isso está cumprindo
+  rentalItemId String   @db.Uuid
+
+  rental       Rental     @relation(fields: [rentalId], references: [id])
+  equipment    Equipment  @relation(fields: [equipmentId], references: [id])
+  rentalItem   RentalItem @relation(fields: [rentalItemId], references: [id])
+
+  assignedAt   DateTime @default(now()) @db.Timestamptz(3)
+  unassignedAt DateTime? @db.Timestamptz(3)
+
+  assignedByUserId String?
+  assignedByUser   User? @relation("RentalEquipmentAssignedBy", fields: [assignedByUserId], references: [id])
+
+  @@unique([rentalId, equipmentId])
+  @@index([equipmentId])
+  @@index([rentalId])
+  @@index([rentalItemId])
+}
+
+model RentalFinancial {
+  rentalId   String @id @db.Uuid
+  rental     Rental @relation(fields: [rentalId], references: [id])
+
+  negotiatedTerms String?
+  subtotal  Decimal? @db.Decimal(12, 2)
+  discount  Decimal? @db.Decimal(12, 2)
+  total     Decimal? @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+
+/* =========================
+   PARTS: Category -> Model -> Part (serial)
+========================= */
+
+model PartCategory {
+  id          String @id @default(uuid()) @db.Uuid
+  name        String @unique
+  description String?
+
+  models      PartModel[]
+
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model PartModel {
+  id          String @id @default(uuid()) @db.Uuid
+
+  categoryId  String @db.Uuid
+  category    PartCategory @relation(fields: [categoryId], references: [id])
+
+  brand       String
+  name        String
+  description String?
+
+  parts       Part[]
+
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  @@unique([categoryId, brand, name])
+  @@index([categoryId])
+  @@index([name])
+}
+
+model Part {
+  id          String @id @default(uuid()) @db.Uuid
+
+  serial      String @unique
+
+  modelId     String @db.Uuid
+  model       PartModel @relation(fields: [modelId], references: [id])
+
+  status      PartStatus @default(AVAILABLE)
+
+  // NF/Doc de compra obrigatório (IN)
+  fiscalDocInId String @db.Uuid
+  fiscalDocIn   FiscalDoc @relation("PartsFromFiscalDocIn", fields: [fiscalDocInId], references: [id])
+
+  // histórico de instalação em equipamentos
+  equipmentLinks EquipmentPart[]
+
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([modelId])
+  @@index([status])
+  @@index([fiscalDocInId])
+}
+
+model EquipmentPart {
+  id          String @id @default(uuid()) @db.Uuid
+
+  equipmentId String @db.Uuid
+  partId      String @db.Uuid
+
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+  part        Part      @relation(fields: [partId], references: [id])
+
+  installedAt DateTime @default(now()) @db.Timestamptz(3)
+  removedAt   DateTime? @db.Timestamptz(3)
+
+  installedByUserId String?
+  installedByUser   User? @relation(fields: [installedByUserId], references: [id])
+
+  notes       String?
+
+  // garante que a mesma peça não fique “instalada duas vezes”
+  @@index([equipmentId])
+  @@index([partId])
+}
+
+/* =========================
+   AGENDA (âncora derivada)
+   - não é core, mas permite linkar OS e visitas
+========================= */
+
+model AgendaItem {
+  id        String @id @default(uuid()) @db.Uuid
+
+  kind      AgendaItemKind
+  status    AgendaItemStatus @default(PLANNED)
+
+  title     String
+  startAt   DateTime @db.Timestamptz(3)
+  endAt     DateTime? @db.Timestamptz(3)
+
+  // referência ao “dono” do item
+  rentalId        String? @db.Uuid
+  rental          Rental? @relation(fields: [rentalId], references: [id])
+
+  supportTicketId String? @db.Uuid
+  supportTicket   SupportTicket? @relation(fields: [supportTicketId], references: [id])
+
+  maintenanceId   String? @db.Uuid
+  maintenance     Maintenance? @relation(fields: [maintenanceId], references: [id])
+
+  // OS atreladas ao item
+  workOrders      WorkOrder[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([kind, startAt])
+  @@index([status])
+  @@index([rentalId])
+}
+
+/* =========================
+   WORK ORDERS (OS)
+========================= */
+
+model WorkOrder {
+  id          String @id @default(uuid()) @db.Uuid
+
+  number      String @unique // "numero da OS" (você gera)
+  type        WorkOrderType
+  status      WorkOrderStatus @default(OPEN)
+
+  description String?
+  actionNotes String? // "descrição da ação"
+
+  date        DateTime @default(now()) @db.Timestamptz(3)
+
+  // quem fez
+  createdByUserId String?
+  createdByUser   User? @relation("WorkOrderCreatedBy", fields: [createdByUserId], references: [id])
+
+  // pode linkar ou não a um item da agenda
+  agendaItemId String? @db.Uuid
+  agendaItem   AgendaItem? @relation(fields: [agendaItemId], references: [id])
+
+  // opcional: amarrar direto a um equipamento (muito útil na prática)
+  equipmentId String? @db.Uuid
+  equipment   Equipment? @relation(fields: [equipmentId], references: [id])
+
+  // assinatura/print (URL do arquivo)
+  witnessSignatureUrl String?
+  witnessName         String?
+  witnessDocument     String?
+
+  photos     WorkOrderPhoto[]
+
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([type])
+  @@index([status])
+  @@index([agendaItemId])
+  // @@index([equipmentId])
+}
+
+model WorkOrderPhoto {
+  id          String @id @default(uuid()) @db.Uuid
+  workOrderId String @db.Uuid
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+
+  url         String
+  fileKey     String?
+
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([workOrderId])
+}
+
+/* =========================
+   SUPPORT (Chamados)
+========================= */
+
+model SupportTicket {
+  id        String @id @default(uuid()) @db.Uuid
+
+  number    String @unique // "numero do chamado"
+  status    SupportTicketStatus @default(OPEN)
+
+  equipmentId String @db.Uuid
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+
+  clientId  String? @db.Uuid
+  client    Client? @relation(fields: [clientId], references: [id])
+
+  // responsável/contato (snapshot)
+  contactName  String
+  contactEmail String?
+  contactPhone String?
+
+  notes       String?
+  solution    String?
+
+  openedAt    DateTime @default(now()) @db.Timestamptz(3)
+  closedAt    DateTime? @db.Timestamptz(3)
+
+  // SLA: você pode guardar o prazo e/ou o vencimento
+  slaMinutes  Int?
+  slaDueAt    DateTime? @db.Timestamptz(3)
+
+  // se for presencial e entrar na agenda
+  executionAt DateTime? @db.Timestamptz(3)
+
+  createdByUserId String?
+  createdByUser   User? @relation("SupportTicketCreatedBy", fields: [createdByUserId], references: [id])
+
+  agendaItems AgendaItem[]
+
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([equipmentId])
+  @@index([clientId])
+  @@index([status])
+  @@index([executionAt])
+}
+
+/* =========================
+   MAINTENANCE (mínimo, mas útil)
+========================= */
+
+enum MaintenanceStatus {
+  OPEN
+  IN_PROGRESS
+  FINISHED
+  CANCELED
+}
+
+model Maintenance {
+  id          String @id @default(uuid()) @db.Uuid
+
+  equipmentId String @db.Uuid
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+
+  status      MaintenanceStatus @default(OPEN)
+  description String?
+
+  openedAt    DateTime @default(now()) @db.Timestamptz(3)
+  closedAt    DateTime? @db.Timestamptz(3)
+
+  // se precisar ir pra agenda (presencial)
+  scheduledAt DateTime? @db.Timestamptz(3)
+
+  createdByUserId String?
+  createdByUser   User? @relation("MaintenanceCreatedBy", fields: [createdByUserId], references: [id])
+
+  agendaItems AgendaItem[]
+
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+  @@index([equipmentId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+/* =========================
+   AUDIT LOGS (todas ações)
+========================= */
+
+model AuditLog {
+  id          String @id @default(uuid()) @db.Uuid
+
+  actorUserId String?
+  actorUser   User? @relation(fields: [actorUserId], references: [id])
+
+  action      String // ex: "rental.create", "part.install", "equipment.sell"
+  entityType  String // "Rental", "Equipment", "Part", ...
+  entityId    String // uuid/string do alvo
+
+  // snapshot do que aconteceu (antes/depois/metadata)
+  data        Json
+
+  ip          String?
+  userAgent   String?
+
+  occurredAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([actorUserId])
+  @@index([entityType, entityId])
+  @@index([occurredAt])
+}
