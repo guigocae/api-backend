@@ -19,7 +19,7 @@ describe('AppController (e2e)', () => {
   it('Health check da aplicação', async () => {
     const response = await request(app.getHttpServer())
       .get('/health/live')
-      .expect(200)
+      .expect(200);
 
     const data = response.body;
     expect(data.status).toBe('ok');
